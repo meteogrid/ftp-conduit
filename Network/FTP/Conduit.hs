@@ -19,12 +19,11 @@ import Data.Conduit.Network (sinkSocket, sourceSocket)
 import Control.Monad.Trans.Resource (MonadResource)
 import qualified Data.ByteString as BS
 import Data.ByteString.UTF8 hiding (foldl)
-import Network.Socket hiding (close, send, sendTo, recv, recvFrom, Closed)
-import qualified Network.Socket as S (close)
+import Network.Socket hiding (send, sendTo, recv, recvFrom, Closed)
 import Network.Socket.ByteString
 import Network.URI
 import Network.Utils
-import Control.Exception
+import Control.Exception (Exception, throw, finally)
 import Data.Word
 import System.ByteOrder
 import Data.Bits
@@ -77,43 +76,42 @@ writeLine s bs = do
   --putStrLn $ "Writing: " ++ (toString bs)
   sendAll s $ bs `BS.append` (fromString "\r\n") -- hardcode the newline for platform independence
 
-close :: (Socket, Socket) -> IO ()
-close (c, d) = do
-  --putStrLn "Closing data connection"
-  S.close d
-  catch (do
+closeConnection :: (Socket, Socket) -> IO ()
+closeConnection (c, d) = finally (do
+    --putStrLn "Closing data connection"
+    close d
     _ <- readExpected c 226
     writeLine c $ fromString "QUIT"
     _ <- readExpected c 221
     --putStrLn "Closing control connection"
-    S.close c
-    ) (\ e -> S.close c >> throw (e :: IOException))
+    close c
+    ) (close c)
 
 -- | Create a conduit source out of a 'URI'. Uses the @RETR@ command.
 createSource :: MonadResource m => URI -> Source m BS.ByteString
-createSource uri = bracketP setup close (sourceSocket . snd)
+createSource uri = bracketP setup closeConnection (sourceSocket . snd)
   where setup = do
           (c, d, path') <- common uri
-          catch (do
+          finally (do
             writeLine c $ fromString "TYPE I"
             _ <- readExpected c 200
             writeLine c $ fromString $ "RETR " ++ path'
             _ <- readExpected c 150
             return (c, d)
-            ) (\ e -> S.close d >> S.close c >> throw (e :: IOException))
+            ) (close d >> close c)
 
 -- | Create a conduit sink out of a 'URI'. Uses the @STOR@ command.
 createSink :: MonadResource m => URI -> Sink BS.ByteString m ()
-createSink uri = bracketP setup close (sinkSocket . snd)
+createSink uri = bracketP setup closeConnection (sinkSocket . snd)
   where setup = do
           (c, d, path') <- common uri
-          catch (do
+          finally (do
             writeLine c $ fromString "TYPE I"
             _ <- readExpected c 200
             writeLine c $ fromString $ "STOR " ++ path'
             _ <- readExpected c 150
             return (c, d)
-            ) (\ e -> S.close d >> S.close c >> throw (e :: IOException))
+            ) (close d >> close c)
 
 common :: URI -> IO (Socket, Socket, String)
 common (URI { uriScheme = scheme'
@@ -123,7 +121,7 @@ common (URI { uriScheme = scheme'
   if scheme' /= "ftp:" then throw $ IncorrectScheme scheme' else return ()
   --putStrLn "Opening control connection"
   c <- connectTCP host (PortNum (hton_16 port))
-  catch (do
+  finally (do
     _ <- readExpected c 220
     writeLine c $ fromString $ "USER " ++ user
     _ <- readExpected c 331
@@ -137,7 +135,7 @@ common (URI { uriScheme = scheme'
     --putStrLn "Opening data connection"
     d <- connectTCP (toString pasvhost) (PortNum (hton_16 pasvport))
     return (c, d, path')
-    ) (\ e -> S.close c >> throw (e :: IOException))
+    ) (close c)
   where (host, port, user, pass) = case authority' of
           Nothing -> undefined
           Just (URIAuth userInfo regName port') ->
