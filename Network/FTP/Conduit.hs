@@ -15,9 +15,12 @@ module Network.FTP.Conduit
   ) where
 
 import Data.Conduit
+import Data.Conduit.Network (sinkSocket, sourceSocket)
+import Control.Monad.Trans.Resource (MonadResource)
 import qualified Data.ByteString as BS
 import Data.ByteString.UTF8 hiding (foldl)
-import Network.Socket hiding (send, sendTo, recv, recvFrom, Closed)
+import Network.Socket hiding (close, send, sendTo, recv, recvFrom, Closed)
+import qualified Network.Socket as S (close)
 import Network.Socket.ByteString
 import Network.URI
 import Network.Utils
@@ -25,9 +28,8 @@ import Control.Exception
 import Data.Word
 import System.ByteOrder
 import Data.Bits
-import Prelude hiding (getLine, catch)
+import Prelude hiding (getLine)
 import Data.Typeable
-import Control.Monad.IO.Class
 
 -- | Thrown if a FTP-level protocol exception happens
 data FTPException = UnexpectedCode Int BS.ByteString
@@ -78,45 +80,40 @@ writeLine s bs = do
 close :: (Socket, Socket) -> IO ()
 close (c, d) = do
   --putStrLn "Closing data connection"
-  sClose d
+  S.close d
   catch (do
     _ <- readExpected c 226
     writeLine c $ fromString "QUIT"
     _ <- readExpected c 221
     --putStrLn "Closing control connection"
-    sClose c
-    ) (\ e -> sClose c >> throw (e :: IOException))
+    S.close c
+    ) (\ e -> S.close c >> throw (e :: IOException))
 
 -- | Create a conduit source out of a 'URI'. Uses the @RETR@ command.
 createSource :: MonadResource m => URI -> Source m BS.ByteString
-createSource uri = sourceIO setup close pull
+createSource uri = bracketP setup close (sourceSocket . snd)
   where setup = do
           (c, d, path') <- common uri
           catch (do
+            writeLine c $ fromString "TYPE I"
+            _ <- readExpected c 200
             writeLine c $ fromString $ "RETR " ++ path'
             _ <- readExpected c 150
             return (c, d)
-            ) (\ e -> sClose d >> sClose c >> throw (e :: IOException))
-        pull (_, d) = liftIO $ do
-          bytes <- recv d 4096
-          if BS.null bytes
-            then do
-              return IOClosed
-            else return $ IOOpen bytes
+            ) (\ e -> S.close d >> S.close c >> throw (e :: IOException))
 
 -- | Create a conduit sink out of a 'URI'. Uses the @STOR@ command.
 createSink :: MonadResource m => URI -> Sink BS.ByteString m ()
-createSink uri = sinkIO setup close push (liftIO . close)
+createSink uri = bracketP setup close (sinkSocket . snd)
   where setup = do
           (c, d, path') <- common uri
           catch (do
+            writeLine c $ fromString "TYPE I"
+            _ <- readExpected c 200
             writeLine c $ fromString $ "STOR " ++ path'
             _ <- readExpected c 150
             return (c, d)
-            ) (\ e -> sClose d >> sClose c >> throw (e :: IOException))
-        push (_, d) input = liftIO $ do
-          sendAll d input
-          return IOProcessing
+            ) (\ e -> S.close d >> S.close c >> throw (e :: IOException))
 
 common :: URI -> IO (Socket, Socket, String)
 common (URI { uriScheme = scheme'
@@ -140,7 +137,7 @@ common (URI { uriScheme = scheme'
     --putStrLn "Opening data connection"
     d <- connectTCP (toString pasvhost) (PortNum (hton_16 pasvport))
     return (c, d, path')
-    ) (\ e -> sClose c >> throw (e :: IOException))
+    ) (\ e -> S.close c >> throw (e :: IOException))
   where (host, port, user, pass) = case authority' of
           Nothing -> undefined
           Just (URIAuth userInfo regName port') ->

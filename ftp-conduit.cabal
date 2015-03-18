@@ -1,5 +1,5 @@
 name:            ftp-conduit
-version:         0.0.5
+version:         0.0.6
 license:         BSD3
 license-file:    LICENSE
 author:          Myles C. Maxfield <myles.maxfield@gmail.com>
@@ -15,8 +15,11 @@ homepage:        https://github.com/litherum/ftp-conduit
 
 library
     build-depends: base         >= 4     && < 5
-                 , conduit      >= 0.4.0 && < 0.5.0
+                 , conduit      >= 0.5
+                 , conduit-extra
+                 , resourcet
                  , network      >= 2.0
+                 , network-uri
                  , bytestring   >= 0.9
                  , MissingH     >= 0.18.6
                  , byteorder    >= 1.0.0
