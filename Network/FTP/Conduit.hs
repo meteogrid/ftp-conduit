@@ -159,6 +159,5 @@ common sckCfg (URI { uriScheme = scheme'
            let addr = SockAddrInet port (hostAddress he)
            proto <- getProtocolNumber "tcp"
            s <- socket AF_INET Stream proto
-           sckCfg s
-           connect s addr
-           return s
+           catch (sckCfg s >> connect s addr >> return s)
+                 (\e -> close s >> throw (e :: IOException))
