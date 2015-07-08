@@ -1,5 +1,5 @@
 name:            ftp-conduit
-version:         0.0.6
+version:         0.0.7
 license:         BSD3
 license-file:    LICENSE
 author:          Myles C. Maxfield <myles.maxfield@gmail.com>
@@ -21,8 +21,6 @@ library
                  , network      >= 2.0
                  , network-uri
                  , bytestring   >= 0.9
-                 , MissingH     >= 0.18.6
-                 , byteorder    >= 1.0.0
                  , transformers >= 0.2.0.0
                  , utf8-string  >= 0.3
     exposed-modules: Network.FTP.Conduit

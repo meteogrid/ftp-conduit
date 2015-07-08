@@ -11,21 +11,22 @@
 module Network.FTP.Conduit
   ( createSink
   , createSource
+  , createSink'
+  , createSource'
   , FTPException(..)
   ) where
 
-import Data.Conduit
+import Data.Conduit hiding (connect)
 import Data.Conduit.Network (sinkSocket, sourceSocket)
 import Control.Monad.Trans.Resource (MonadResource)
 import qualified Data.ByteString as BS
 import Data.ByteString.UTF8 hiding (foldl)
 import Network.Socket hiding (send, sendTo, recv, recvFrom, Closed)
+import Network.BSD
 import Network.Socket.ByteString
 import Network.URI
-import Network.Utils
 import Control.Exception (Exception, IOException, throw, catch, finally)
 import Data.Word
-import System.ByteOrder
 import Data.Bits
 import Prelude hiding (getLine)
 import Data.Typeable
@@ -38,12 +39,6 @@ data FTPException = UnexpectedCode Int BS.ByteString
   deriving (Typeable, Show)
 
 instance Exception FTPException
-
-hton_16 :: Word16 -> Word16
-hton_16 x = case byteOrder of
-  BigEndian -> x
-  LittleEndian -> x `shiftL` 8 + x `shiftR` 8
-  _ -> undefined
 
 getByte :: Socket -> IO Word8
 getByte s = do
@@ -90,9 +85,13 @@ closeConnection (c, d) = do
 
 -- | Create a conduit source out of a 'URI'. Uses the @RETR@ command.
 createSource :: MonadResource m => URI -> Source m BS.ByteString
-createSource uri = bracketP setup closeConnection (sourceSocket . snd)
+createSource = createSource' (const (return ()))
+
+createSource'
+  :: MonadResource m => (Socket -> IO ()) -> URI -> Source m BS.ByteString
+createSource' sckCfg uri = bracketP setup closeConnection (sourceSocket . snd)
   where setup = do
-          (c, d, path') <- common uri
+          (c, d, path') <- common sckCfg uri
           catch (do
             writeLine c $ fromString "TYPE I"
             _ <- readExpected c 200
@@ -103,9 +102,13 @@ createSource uri = bracketP setup closeConnection (sourceSocket . snd)
 
 -- | Create a conduit sink out of a 'URI'. Uses the @STOR@ command.
 createSink :: MonadResource m => URI -> Sink BS.ByteString m ()
-createSink uri = bracketP setup closeConnection (sinkSocket . snd)
+createSink = createSink' (const (return ()))
+
+createSink'
+  :: MonadResource m => (Socket -> IO ()) -> URI -> Sink BS.ByteString m ()
+createSink' sckCfg uri = bracketP setup closeConnection (sinkSocket . snd)
   where setup = do
-          (c, d, path') <- common uri
+          (c, d, path') <- common sckCfg uri
           catch (do
             writeLine c $ fromString "TYPE I"
             _ <- readExpected c 200
@@ -114,14 +117,14 @@ createSink uri = bracketP setup closeConnection (sinkSocket . snd)
             return (c, d)
             ) (\ e -> close d >> close c >> throw (e :: IOException))
 
-common :: URI -> IO (Socket, Socket, String)
-common (URI { uriScheme = scheme'
-       , uriAuthority = authority'
-       , uriPath = path'
-       }) = do
+common :: (Socket -> IO ()) -> URI -> IO (Socket, Socket, String)
+common sckCfg (URI { uriScheme = scheme'
+                   , uriAuthority = authority'
+                   , uriPath = path'
+                   }) = do
   if scheme' /= "ftp:" then throw $ IncorrectScheme scheme' else return ()
   --putStrLn "Opening control connection"
-  c <- connectTCP host (PortNum (hton_16 port))
+  c <- connectTCP chost (fromIntegral cport)
   catch (do
     _ <- readExpected c 220
     writeLine c $ fromString $ "USER " ++ user
@@ -134,10 +137,11 @@ common (URI { uriScheme = scheme'
     pasv_response <- readExpected c 227
     let (pasvhost, pasvport) = parsePasvString pasv_response
     --putStrLn "Opening data connection"
-    d <- connectTCP (toString pasvhost) (PortNum (hton_16 pasvport))
+    d <- connectTCP (toString pasvhost) (fromIntegral pasvport)
     return (c, d, path')
     ) (\ e -> close c >> throw (e :: IOException))
-  where (host, port, user, pass) = case authority' of
+  where cport :: Word16
+        (chost, cport, user, pass) = case authority' of
           Nothing -> undefined
           Just (URIAuth userInfo regName port') ->
             ( regName
@@ -147,5 +151,14 @@ common (URI { uriScheme = scheme'
             )
         parsePasvString ps = (pasvhost, pasvport)
           where pasvhost = BS.init $ foldl (\ a ip -> a `BS.append` (fromString $ show ip) `BS.append` (fromString ".")) BS.empty [ip1, ip2, ip3, ip4]
+                pasvport :: Word16
                 pasvport = (fromIntegral port1) `shiftL` 8 + (fromIntegral port2)
                 (ip1, ip2, ip3, ip4, port1, port2) = read $ toString $ (`BS.append` (fromString ")")) $ (BS.takeWhile (/= 41)) $ (BS.dropWhile (/= 40)) ps :: (Int, Int, Int, Int, Int, Int)
+        connectTCP host port = do
+           he <- getHostByName host
+           let addr = SockAddrInet port (hostAddress he)
+           proto <- getProtocolNumber "tcp"
+           s <- socket AF_INET Stream proto
+           sckCfg s
+           connect s addr
+           return s
